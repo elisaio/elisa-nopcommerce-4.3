@@ -137,6 +137,7 @@ namespace Nop.Plugin.API.ElisaIntegration.Services
             out decimal discountAmount,
             out List<Discount> appliedDiscounts)
         {
+            //Custom code by Ajay Chauhan on 17-03-2022
             //Call base class method in default behaviour and call custom logic based on elisa session existance
             //store unique elisa cart Id in session
             var elisaCsrtId = _httpContextAccessor.HttpContext.Session.Get<Guid>(ElisaPluginDefaults.ElisaCartId);
@@ -187,6 +188,7 @@ namespace Nop.Plugin.API.ElisaIntegration.Services
                     }
                 }
 
+                //Custom code by Ajay Chauhan on 17-03-2022
                 //Call base class method in default behaviour and call custom logic based on elisa session existance
                 //get price of a product (with previously calculated price of all attributes)
                 if (product.CustomerEntersPrice || (isSessionExists && customerEnteredPrice > 0))

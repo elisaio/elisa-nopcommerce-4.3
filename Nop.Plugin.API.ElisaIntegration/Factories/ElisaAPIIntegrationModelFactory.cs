@@ -8,6 +8,7 @@ using Nop.Core.Caching;
 using Nop.Core.Domain.Catalog;
 using Nop.Core.Domain.Media;
 using Nop.Core.Domain.Orders;
+using Nop.Core.Domain.Stores;
 using Nop.Core.Http.Extensions;
 using Nop.Data;
 using Nop.Plugin.API.ElisaIntegration.Domain;
@@ -22,6 +23,7 @@ using Nop.Services.Logging;
 using Nop.Services.Media;
 using Nop.Services.Orders;
 using Nop.Services.Seo;
+using Nop.Services.Stores;
 using NUglify.Helpers;
 using System;
 using System.Collections.Generic;
@@ -39,6 +41,7 @@ namespace Nop.Plugin.API.ElisaIntegration.Factories
         private readonly IRepository<ProductAttributeCombination> _productAttributeCombinationRepository;
         private readonly IRepository<ShoppingCartItem> _sciRepository;
         private readonly IRepository<StockQuantityHistory> _stockQuantityHistoryRepository;
+        private readonly IRepository<StoreMapping> _storeMappingRepository;
         private readonly IRepository<Order> _orderRepository;
         private readonly IActionContextAccessor _actionContextAccessor;
         private readonly ICustomerActivityService _customerActivityService;
@@ -61,6 +64,7 @@ namespace Nop.Plugin.API.ElisaIntegration.Factories
         private readonly IWorkContext _workContext;
         private readonly MediaSettings _mediaSettings;
         private readonly CustomCartService _customCartService;
+        private readonly CatalogSettings _catalogSettings;
         #endregion
 
         #region Ctor
@@ -68,6 +72,7 @@ namespace Nop.Plugin.API.ElisaIntegration.Factories
             IRepository<ProductAttributeCombination> productAttributeCombinationRepository,
             IRepository<ShoppingCartItem> sciRepository,
             IRepository<StockQuantityHistory> stockQuantityHistoryRepository,
+            IRepository<StoreMapping> storeMappingRepository,
             IRepository<Order> orderRepository,
             IActionContextAccessor actionContextAccessor,
             ICustomerActivityService customerActivityService,
@@ -84,17 +89,20 @@ namespace Nop.Plugin.API.ElisaIntegration.Factories
             IShoppingCartService shoppingCartService,
             IStaticCacheManager staticCacheManager,
             IStoreContext storeContext,
+            IStoreMappingService storeMappingService,
             IUrlHelperFactory urlHelperFactory,
             IUrlRecordService urlRecordService,
             IWebHelper webHelper,
             IWorkContext workContext,
             MediaSettings mediaSettings,
-            CustomCartService customCartService)
+            CustomCartService customCartService,
+            CatalogSettings catalogSettings)
         {
             _productRepository = productRepository;
             _productAttributeCombinationRepository = productAttributeCombinationRepository;
             _sciRepository = sciRepository;
             _stockQuantityHistoryRepository = stockQuantityHistoryRepository;
+            _storeMappingRepository = storeMappingRepository;
             _orderRepository = orderRepository;
             _actionContextAccessor = actionContextAccessor;
             _customerActivityService = customerActivityService;
@@ -117,11 +125,12 @@ namespace Nop.Plugin.API.ElisaIntegration.Factories
             _workContext = workContext;
             _mediaSettings = mediaSettings;
             _customCartService = customCartService;
+            _catalogSettings = catalogSettings;
         }
         #endregion
 
         #region Methods
-        public string PrepareProdutsJsonSerilization(string timeStamp, int pageNumber, string store)
+        public string PrepareProdutsJsonSerilization(string timeStamp, int pageNumber)
         {
             ItemsResponseDto items = new ItemsResponseDto();
             IList<CustomProductModel> productList = new List<CustomProductModel>();
@@ -147,109 +156,130 @@ namespace Nop.Plugin.API.ElisaIntegration.Factories
 
             var products = from p in _productRepository.Table
                            orderby p.DisplayOrder, p.Id
-                           where (productIds.Count > 0 ? productIds.Contains(p.Id) : false) || 
+                           where (productIds.Count > 0 ? productIds.Contains(p.Id) : false) ||
                            p.UpdatedOnUtc >= fromDate.Value
                            select p;
 
             products = products.Where(x => x.Published && !x.Deleted);
 
-            var updatedProducts = new PagedList<Product>(products, pageNumber, pageSize);
+            if (!_catalogSettings.IgnoreStoreLimitations)
+            {
+                products = from p in products
+                           join sm in _storeMappingRepository.Table
+                               on new { p1 = p.Id, p2 = nameof(Product) } equals new { p1 = sm.EntityId, p2 = sm.EntityName } into p_sm
+                           from sm in p_sm.DefaultIfEmpty()
+                           where !p.LimitedToStores || _storeContext.CurrentStore.Id == sm.StoreId
+                           select p;
+            }
+
+        var updatedProducts = new PagedList<Product>(products, pageNumber, pageSize);
 
             foreach (var product in updatedProducts)
             {
-                var picture = _pictureService.GetPicturesByProductId(product.Id, 1).FirstOrDefault();
-                var pictures = _pictureService.GetPicturesByProductId(product.Id);
-                var productAttributeMappings = _productAttributeService.GetProductAttributeMappingsByProductId(product.Id);
-                //get product SEO slug name
-                var seName = _urlRecordService.GetSeName(product);
-                IList<ProductAttributesModel> cpam = new List<ProductAttributesModel>();
-
-                foreach (var pam in productAttributeMappings)
+                try
                 {
-                    var productAttribute = _productAttributeService.GetProductAttributeById(pam.ProductAttributeId);
-                    var productAttributeValue = _productAttributeService.GetProductAttributeValues(pam.Id);
-                    cpam.Add(new ProductAttributesModel
+                    var picture = _pictureService.GetPicturesByProductId(product.Id, 1)?.FirstOrDefault() ?? null;
+                    var pictures = _pictureService.GetPicturesByProductId(product.Id);
+                    var productAttributeMappings = _productAttributeService.GetProductAttributeMappingsByProductId(product.Id);
+                    //get product SEO slug name
+                    var seName = _urlRecordService.GetSeName(product);
+                    IList<ProductAttributesModel> cpam = new List<ProductAttributesModel>();
+
+                    foreach (var pam in productAttributeMappings)
                     {
-                        AttributeId = productAttribute.Id,
-                        Name = productAttribute.Name,
-                        Position = pam.DisplayOrder,
-                        AttributeValues = productAttributeValue.Select(x => x.Name).ToList()
-                    });
-                }
-
-                var customProduct = new CustomProductModel
-                {
-                    Id = product.Id,
-                    ParentId = product.ParentGroupedProductId,
-                    AttributeCombinationId = 0,
-                    Name = product.Name,
-                    Sku = product.Sku,
-                    Price = product.Price,
-                    Description = product.ShortDescription,
-                    ProductDetailUrl = urlHelper.RouteUrl("Product", new { SeName = seName }, _webHelper.CurrentRequestProtocol),
-                    ProductType = ((CustomProductTypes)product.ProductTypeId).ToString(),
-                    Status = product.Published ? "enabled" : "disabled",
-                    MainImage = _pictureService.GetPictureUrl(ref picture, _mediaSettings.ProductThumbPictureSize),
-                    OtherImage = pictures.Select(x => _pictureService.GetPictureUrl(ref x, _mediaSettings.AssociatedProductPictureSize, false)).ToList(),
-                    ManageStock = product.ManageInventoryMethodId == 2 ? false : true,
-                    Inventory = product.ManageInventoryMethodId == 2 ? 0 : product.StockQuantity,
-                    AllowOutOfStock = false,
-                    //AvailableProductAttributes = product.ManageInventoryMethodId == 2 ? cpam : null
-                    AvailableProductAttributes = cpam
-                };
-
-                productList.Add(customProduct);
-
-                //insert child products if available
-                var pacs = _productAttributeService.GetAllProductAttributeCombinations(product.Id);
-                if (pacs.Count > 0)
-                {
-                    foreach (var pac in pacs)
-                    {
-                        if (combinationIds.Count > 0 && !combinationIds.Contains(pac.Id))
-                            continue;
-
-                        List<AssociatedProductAttributesModel> associatedAttributes = new List<AssociatedProductAttributesModel>();
-                        var parsedProductAttributes = _productAttributeParser.ParseProductAttributeMappings(pac.AttributesXml);
-                        if (parsedProductAttributes.Count > 0)
+                        var productAttribute = _productAttributeService.GetProductAttributeById(pam.ProductAttributeId);
+                        var productAttributeValue = _productAttributeService.GetProductAttributeValues(pam.Id);
+                        cpam.Add(new ProductAttributesModel
                         {
-                            foreach (var ppa in parsedProductAttributes)
+                            AttributeId = productAttribute.Id,
+                            Name = productAttribute.Name,
+                            Position = pam.DisplayOrder,
+                            AttributeValues = productAttributeValue.Select(x => x.Name).ToList()
+                        });
+                    }
+
+                    var customProduct = new CustomProductModel
+                    {
+                        Id = product.Id,
+                        ParentId = product.ParentGroupedProductId,
+                        AttributeCombinationId = 0,
+                        Name = product.Name,
+                        Sku = product.Sku,
+                        Price = product.Price,
+                        Description = product.ShortDescription,
+                        ProductDetailUrl = urlHelper.RouteUrl("Product", new { SeName = seName }, _webHelper.CurrentRequestProtocol),
+                        ProductType = ((CustomProductTypes)product.ProductTypeId).ToString(),
+                        Status = product.Published ? "enabled" : "disabled",
+                        MainImage = picture != null ? _pictureService.GetPictureUrl(ref picture, _mediaSettings.ProductThumbPictureSize) : _pictureService.GetDefaultPictureUrl(_mediaSettings.ProductThumbPictureSize),
+                        OtherImage = pictures != null && pictures.Count > 0 ? pictures.Select(x => _pictureService.GetPictureUrl(ref x, _mediaSettings.AssociatedProductPictureSize, false)).ToList() : null,
+                        ManageStock = product.ManageInventoryMethodId == 2 ? false : true,
+                        Inventory = product.ManageInventoryMethodId == 2 ? 0 : product.StockQuantity,
+                        AllowOutOfStock = false,
+                        //AvailableProductAttributes = product.ManageInventoryMethodId == 2 ? cpam : null
+                        AvailableProductAttributes = cpam
+                    };
+
+                    productList.Add(customProduct);
+
+                    //insert child products if available
+                    var pacs = _productAttributeService.GetAllProductAttributeCombinations(product.Id);
+                    if (pacs.Count > 0)
+                    {
+                        foreach (var pac in pacs)
+                        {
+                            if (combinationIds.Count > 0 && !combinationIds.Contains(pac.Id))
+                                continue;
+
+                            List<AssociatedProductAttributesModel> associatedAttributes = new List<AssociatedProductAttributesModel>();
+                            if (!string.IsNullOrEmpty(pac.AttributesXml))
                             {
-                                var attributeValuesStr = _productAttributeParser.ParseValues(pac.AttributesXml, ppa.Id);
-                                foreach (var av in attributeValuesStr)
+                                var parsedProductAttributes = _productAttributeParser.ParseProductAttributeMappings(pac.AttributesXml);
+                                if (parsedProductAttributes.Count > 0)
                                 {
-                                    associatedAttributes.Add(new AssociatedProductAttributesModel
+                                    foreach (var ppa in parsedProductAttributes)
                                     {
-                                        ProductAttibuteId = ppa.ProductAttributeId,
-                                        ProductAttributeValue = _productAttributeService.GetProductAttributeValueById(int.Parse(av)).Name
-                                    });
+                                        var attributeValuesStr = _productAttributeParser.ParseValues(pac.AttributesXml, ppa.Id);
+                                        foreach (var av in attributeValuesStr)
+                                        {
+                                            associatedAttributes.Add(new AssociatedProductAttributesModel
+                                            {
+                                                ProductAttibuteId = ppa.ProductAttributeId,
+                                                ProductAttributeValue = _productAttributeService.GetProductAttributeValueById(int.Parse(av))?.Name ?? string.Empty
+                                            });
+                                        }
+                                    }
                                 }
                             }
-                        }
 
-                        var childProductPicture = _pictureService.GetPictureById(pac.PictureId);
-                        var childProduct = new CustomProductModel
-                        {
-                            Id = pac.Id,
-                            ParentId = product.Id,
-                            AttributeCombinationId = pac.Id,
-                            Name = product.Name + " " + pac.Sku,
-                            Sku = product.Sku + "-" + pac.Sku,
-                            Price = Convert.ToDecimal(pac.OverriddenPrice),
-                            Description = product.ShortDescription,
-                            ProductDetailUrl = urlHelper.RouteUrl("Product", new { SeName = seName }, _webHelper.CurrentRequestProtocol),
-                            ProductType = CustomProductTypes.Simple.ToString(),
-                            Status = product.Published && pac.StockQuantity > 0 ? "enabled" : "disabled",
-                            MainImage = _pictureService.GetPictureUrl(ref childProductPicture, _mediaSettings.ProductThumbPictureSize),
-                            OtherImage = pictures.Select(x => _pictureService.GetPictureUrl(ref x, _mediaSettings.AssociatedProductPictureSize, false)).ToList(),
-                            ManageStock = true,
-                            Inventory = pac.StockQuantity,
-                            AllowOutOfStock = pac.AllowOutOfStockOrders,
-                            AssociatedProductAttributes = associatedAttributes,
-                            AttributeXML = pac.AttributesXml
-                        };
-                        productList.Add(childProduct);
+                            var childProductPicture = _pictureService.GetPictureById(pac.PictureId);
+                            var childProduct = new CustomProductModel
+                            {
+                                Id = pac.Id,
+                                ParentId = product.Id,
+                                AttributeCombinationId = pac.Id,
+                                Name = product.Name + " " + pac.Sku,
+                                Sku = product.Sku + "-" + pac.Sku,
+                                Price = Convert.ToDecimal(pac.OverriddenPrice),
+                                Description = product.ShortDescription,
+                                ProductDetailUrl = urlHelper.RouteUrl("Product", new { SeName = seName }, _webHelper.CurrentRequestProtocol),
+                                ProductType = CustomProductTypes.Simple.ToString(),
+                                Status = product.Published && pac.StockQuantity > 0 ? "enabled" : "disabled",
+                                MainImage = childProductPicture != null ? _pictureService.GetPictureUrl(ref childProductPicture, _mediaSettings.ProductThumbPictureSize) : _pictureService.GetDefaultPictureUrl(_mediaSettings.ProductThumbPictureSize),
+                                OtherImage = pictures != null && pictures.Count > 0 ? pictures.Select(x => _pictureService.GetPictureUrl(ref x, _mediaSettings.AssociatedProductPictureSize, false)).ToList() : null,
+                                ManageStock = true,
+                                Inventory = pac.StockQuantity,
+                                AllowOutOfStock = pac.AllowOutOfStockOrders,
+                                AssociatedProductAttributes = associatedAttributes,
+                                AttributeXML = pac.AttributesXml
+                            };
+                            productList.Add(childProduct);
+                        }
                     }
+                }
+                catch (Exception ex)
+                {
+                    _logger.Error(ex.Message);
+                    throw;
                 }
             }
 
@@ -428,11 +458,12 @@ namespace Nop.Plugin.API.ElisaIntegration.Factories
             DateTime dtDateTime = new DateTime(1970, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc);
             DateTime? fromDate = dtDateTime.AddSeconds(Convert.ToDouble(timeStamp)).ToUniversalTime();
 
-            var orders = (from o in _orderRepository.Table
-                          where Convert.ToDecimal(timeStamp) > 0 ? o.CreatedOnUtc > fromDate.Value : true
-                          select o).ToList();
+            var orders = from o in _orderRepository.Table
+                          where Convert.ToDecimal(timeStamp) > 0 ? o.CreatedOnUtc > fromDate.Value : true &&
+                          (!_catalogSettings.IgnoreStoreLimitations) ? o.StoreId == _storeContext.CurrentStore.Id : true
+                         select o;
 
-            foreach (var order in orders)
+            foreach (var order in orders.ToList())
             {
                 var elisaReferenceId = _genericAttributeService.GetAttribute<Guid>(order, ElisaPluginDefaults.ElisaReference, _storeContext.CurrentStore.Id);
 
