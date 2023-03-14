@@ -130,7 +130,7 @@ namespace Nop.Plugin.API.ElisaIntegration.Factories
         #endregion
 
         #region Methods
-        public string PrepareProdutsJsonSerilization(string timeStamp, int pageNumber)
+        public string PrepareProdutsJsonSerilization(string timeStamp, int pageNumber, int pageSize = 1000)
         {
             ItemsResponseDto items = new ItemsResponseDto();
             IList<CustomProductModel> productList = new List<CustomProductModel>();
@@ -141,7 +141,6 @@ namespace Nop.Plugin.API.ElisaIntegration.Factories
             List<int> productIds = new List<int>();
             List<int?> combinationIds = new List<int?>();
 
-            int pageSize = 1000;
             if (Convert.ToDouble(timeStamp) > 0)
             {
                 var query = (from sqh in _stockQuantityHistoryRepository.Table
@@ -279,7 +278,6 @@ namespace Nop.Plugin.API.ElisaIntegration.Factories
                 catch (Exception ex)
                 {
                     _logger.Error(ex.Message);
-                    throw;
                 }
             }
 
@@ -361,8 +359,10 @@ namespace Nop.Plugin.API.ElisaIntegration.Factories
                     //store unique elisa cart Id in session
                     _httpContextAccessor.HttpContext.Session.Set(ElisaPluginDefaults.ElisaCartId, elisaReferenceId);
 
+                    var currentCustomer = _workContext.CurrentCustomer;
+                    var currentStore = _storeContext.CurrentStore;
                     //●	Delete all current products in the customer basket, if any
-                    var cart = _shoppingCartService.GetShoppingCart(_workContext.CurrentCustomer, ShoppingCartType.ShoppingCart, _storeContext.CurrentStore.Id);
+                    var cart = _shoppingCartService.GetShoppingCart(currentCustomer, ShoppingCartType.ShoppingCart, currentStore.Id);
                     cart.ForEach(x => _shoppingCartService.DeleteShoppingCartItem(x));
                     //cart.Clear();
 
@@ -383,10 +383,10 @@ namespace Nop.Plugin.API.ElisaIntegration.Factories
                             }
 
                             //now let's try adding product to the cart (now including product attribute validation, etc)
-                            var addToCartWarnings = _shoppingCartService.AddToCart(customer: _workContext.CurrentCustomer,
+                            var addToCartWarnings = _shoppingCartService.AddToCart(customer: currentCustomer,
                                 product: product,
                                 shoppingCartType: ShoppingCartType.ShoppingCart,
-                                storeId: _storeContext.CurrentStore.Id,
+                                storeId: currentStore.Id,
                                 attributesXml: attrXml,
                                 customerEnteredPrice: item.Price > 0 ? item.Price : product.Price,
                                 quantity: item.Quantity);
@@ -400,10 +400,10 @@ namespace Nop.Plugin.API.ElisaIntegration.Factories
                                 _customCartService.DeleteCustomCartItems(cartItems);
 
                                 //remove items from shopping cart item table if any
-                                var partialCart = _shoppingCartService.GetShoppingCart(_workContext.CurrentCustomer, ShoppingCartType.ShoppingCart, _storeContext.CurrentStore.Id);
+                                var partialCart = _shoppingCartService.GetShoppingCart(currentCustomer, ShoppingCartType.ShoppingCart, currentStore.Id);
                                 partialCart.ForEach(x => _sciRepository.Delete(x));
 
-                                _staticCacheManager.Clear();
+                                //_staticCacheManager.Clear();
 
                                 response.IsSuccess = false;
                                 addToCartWarnings.ForEach(x => _logger.Error(x));
@@ -457,22 +457,25 @@ namespace Nop.Plugin.API.ElisaIntegration.Factories
             IList<OrderResponseDto> elisaOrders = new List<OrderResponseDto>();
             DateTime dtDateTime = new DateTime(1970, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc);
             DateTime? fromDate = dtDateTime.AddSeconds(Convert.ToDouble(timeStamp)).ToUniversalTime();
+            var currentStore = _storeContext.CurrentStore;
+            var ordersQuery = (from o in _orderRepository.Table
+                          where o.StoreId == currentStore.Id
+                         select o);
 
-            var orders = from o in _orderRepository.Table
-                          where Convert.ToDecimal(timeStamp) > 0 ? o.CreatedOnUtc > fromDate.Value : true &&
-                          (!_catalogSettings.IgnoreStoreLimitations) ? o.StoreId == _storeContext.CurrentStore.Id : true
-                         select o;
+            if (Convert.ToDecimal(timeStamp) > 0)
+            {
+                ordersQuery = ordersQuery.Where(o => o.CreatedOnUtc > fromDate.Value);
+            }
+            var orders = ordersQuery.ToList();
 
             foreach (var order in orders.ToList())
             {
-                var elisaReferenceId = _genericAttributeService.GetAttribute<Guid>(order, ElisaPluginDefaults.ElisaReference, _storeContext.CurrentStore.Id);
-
-                var customCartItems = _customCartService.GetCustomCartItemsByCartId(elisaReferenceId);
-
-                var orderItems = _orderService.GetOrderItems(order.Id);
+                var elisaReferenceId = _genericAttributeService.GetAttribute<Guid>(order, ElisaPluginDefaults.ElisaReference, currentStore.Id);
 
                 if (elisaReferenceId != null && elisaReferenceId != Guid.Empty)
                 {
+                    var orderItems = _orderService.GetOrderItems(order.Id);
+
                     var elisaOrder = new OrderResponseDto
                     {
                         OrderId = order.Id,

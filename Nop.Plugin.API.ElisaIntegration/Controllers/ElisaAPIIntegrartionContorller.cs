@@ -83,14 +83,14 @@ namespace Nop.Plugin.API.ElisaIntegration.Controllers
 
         [HttpPost]
         [Route("/elisa/products/{timestamp}/{page}")]
-        public IActionResult GetProducts(string timestamp, int page)
+        public IActionResult GetProducts(string timestamp, int page, int pageSize = 1000)
         {
             APIResponseDto response = new APIResponseDto();
 
             var isValid = ValidateToken();
             if (isValid)
             {
-                var result = _elisaAPIIntegrationModelFactory.PrepareProdutsJsonSerilization(timestamp, page);
+                var result = _elisaAPIIntegrationModelFactory.PrepareProdutsJsonSerilization(timestamp, page, pageSize);
 
                 if (string.IsNullOrEmpty(result))
                     return BadRequest();
